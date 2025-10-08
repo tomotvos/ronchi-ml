@@ -1,0 +1,17 @@
+# Training configuration (Regression on p_corr)
+seed: 42
+image_size: 320
+batch_size: 32
+epochs: 10
+lr: 2.0e-4
+weight_decay: 0.01
+backbone: "efficientnet_b0"
+pretrained: true
+freeze_backbone: true
+num_workers: 2
+labels: ["p_corr"]
+loss: "huber"     # 'huber' or 'mse'
+metric: "rmse"    # for reporting
+train_val_test_split: [0.7, 0.2, 0.1]
+manifest_path: "data/manifest.jsonl"
+output_dir: "weights"

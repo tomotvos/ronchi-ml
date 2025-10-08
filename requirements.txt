@@ -1,0 +1,20 @@
+# ---- Core numeric stack (NumPy 1.x ABI) ----
+numpy==1.26.4
+pybind11==2.12.0
+
+# ---- PyTorch CPU (macOS x86_64, Python 3.11) ----
+torch==2.2.2
+torchvision==0.17.2
+
+# ---- Vision / training utils ----
+timm==1.0.9
+pillow==10.4.0
+pyyaml==6.0.2
+pandas==2.2.2
+scipy==1.11.4
+scikit-learn==1.4.2
+opencv-python-headless>=4.8.0
+
+# ---- Serving & export ----
+onnx==1.16.2
+onnxruntime==1.18.1

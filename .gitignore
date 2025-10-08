@@ -1,0 +1,26 @@
+# Python cruft
+__pycache__/
+*.pyc
+
+# Virtual envs
+.venv/
+
+# Data (keep a tiny sample dataset under data/sample/ if you want)
+data/*
+!data/README.md
+!data/sample/**
+# If you do want to track your full manifest, remove the line above and add:
+!data/sample.jsonl
+
+# Models and training artifacts
+models/**
+!models/.gitkeep
+weights/
+
+# Logs / runs
+logs/**
+runs/**
+
+# IDE/editor
+.vscode/
+.idea/
