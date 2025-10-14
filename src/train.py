@@ -1,5 +1,5 @@
 
-import argparse, json, numpy as np, torch, torch.nn as nn, tempfile, os, random, math
+import argparse, json, numpy as np, torch, torch.nn as nn, tempfile, os, random
 from torch.utils.data import DataLoader
 from data import RonchiJSONLDataset, CondNorm, OffsetNorm
 from model import Net
@@ -10,7 +10,7 @@ def _ensure_parent(path):
         os.makedirs(d, exist_ok=True)
 
 def _scan_stats(jsonl_path):
-    P, F, L, OFF = [], [], [], []
+    P, F, LINES, OFF = [], [], [], []
     with open(jsonl_path) as f:
         for line in f:
             line = line.strip()
@@ -18,14 +18,14 @@ def _scan_stats(jsonl_path):
             o = json.loads(line)
             P.append(float(o['labels']['p_corr']))
             F.append(float(o['meta']['f']))
-            L.append(float(o['meta']['lpi']))
-            OFF.append(float(o['meta']['offset']))
+            LINES.append(float(o['meta']['lines']))   # <-- changed from lpi
+            OFF.append(float(o['meta']['offset']))    # <-- now dimensionless
     def stats(a):
         return float(np.mean(a)), float(np.std(a) + 1e-6)
-    (f_mu, f_sd)   = stats(F)
-    (l_mu, l_sd)   = stats(L)
-    (off_mu, off_sd) = stats(OFF)
-    Cnorm = CondNorm(f_mu=f_mu, f_sigma=f_sd, lpi_mu=l_mu, lpi_sigma=l_sd)
+    (f_mu, f_sd)         = stats(F)
+    (lines_mu, lines_sd) = stats(LINES)
+    (off_mu, off_sd)     = stats(OFF)
+    Cnorm = CondNorm(f_mu=f_mu, f_sigma=f_sd, lines_mu=lines_mu, lines_sigma=lines_sd)
     Onorm = OffsetNorm(off_mu=off_mu, off_sigma=off_sd)
     return Cnorm, Onorm
 
@@ -90,7 +90,7 @@ def train(args):
     sched, sched_mode = _make_scheduler(opt, len(dl_tr), args)
     l1 = nn.SmoothL1Loss()
 
-    best = math.inf
+    best = float('inf')
     try:
         for ep in range(args.epochs):
             model.train()
@@ -98,12 +98,11 @@ def train(args):
             for img, cond, y_p, y_off in dl_tr:
                 img, cond, y_p, y_off = img.to(device), cond.to(device), y_p.to(device), y_off.to(device)
                 p_hat, off_hat = model(img, cond)
-                loss_p   = l1(p_hat, y_p)                 # p_corr in natural units
-                loss_off = l1(off_hat, y_off)             # offset in normalized units
+                loss_p   = l1(p_hat, y_p)               # p_corr in natural units
+                loss_off = l1(off_hat, y_off)           # offset in normalized units (dimensionless)
                 loss = loss_p + args.off_weight * loss_off
 
-                opt.zero_grad()
-                loss.backward()
+                opt.zero_grad(); loss.backward()
                 if args.clip > 0:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.clip)
                 opt.step()
@@ -123,27 +122,27 @@ def train(args):
             avg_p    = running["p"]/denom
             avg_off  = running["off"]/denom
 
-            # Validation (report p_corr MAE in natural units, clamped to [0,1], and offset MAE in inches)
+            # Validation (report p_corr MAE in [0,1] and offset MAE in dimensionless units)
             model.eval()
-            n, p_mae, off_mae_in = 0, 0.0, 0.0
+            n, p_mae, off_mae_dimless = 0, 0.0, 0.0
             with torch.no_grad():
                 for img, cond, y_p, y_off in dl_va:
                     img, cond, y_p, y_off = img.to(device), cond.to(device), y_p.to(device), y_off.to(device)
                     p_hat, off_hat = model(img, cond)
                     # p_corr MAE (clamped for readability)
                     p_mae += torch.abs(torch.clamp(p_hat, 0, 1) - y_p).sum().item()
-                    # offset MAE in inches (denormalize)
-                    off_pred_in = off_hat * Onorm.off_sigma + Onorm.off_mu
-                    off_true_in = y_off * Onorm.off_sigma + Onorm.off_mu
-                    off_mae_in += torch.abs(off_pred_in - off_true_in).sum().item()
+                    # offset MAE in dimensionless units (denormalize with train stats)
+                    off_pred = off_hat * Onorm.off_sigma + Onorm.off_mu
+                    off_true = y_off   * Onorm.off_sigma + Onorm.off_mu
+                    off_mae_dimless += torch.abs(off_pred - off_true).sum().item()
                     n += img.size(0)
             p_mae /= max(n,1)
-            off_mae_in /= max(n,1)
+            off_mae_dimless /= max(n,1)
 
-            print(f"Epoch {ep+1}/{args.epochs}"
-                  f"  train| loss={avg_loss:.4f} p_loss={avg_p:.4f} off_loss={avg_off:.4f}"
-                  f"  val| p_corr_MAE={p_mae:.4f}  offset_in_MAE={off_mae_in:.3f}\""
-                  f"  lr={opt.param_groups[0]['lr']:.2e}")
+            print(f"Epoch {ep+1}/{args.epochs}  "
+                  f"train| loss={avg_loss:.4f} p_loss={avg_p:.4f} off_loss={avg_off:.4f}  "
+                  f"val| p_corr_MAE={p_mae:.4f}  offset_dimless_MAE={off_mae_dimless:.5f}  "
+                  f"lr={opt.param_groups[0]['lr']:.2e}")
 
             if p_mae < best:
                 best = p_mae
@@ -179,7 +178,7 @@ if __name__ == '__main__':
     ap.add_argument('--sched',  choices=['onecycle','none'], default='onecycle')
     ap.add_argument('--pct-start', type=float, default=0.3, help='OneCycleLR warmup fraction')
     ap.add_argument('--div-factor', type=float, default=25.0, help='OneCycleLR initial_lr = max_lr/div_factor')
-    ap.add_argument('--final-div-factor', type=float, default=1e3, help='OneCycleLR min_lr = initial_lr/final_div_factor')
+    ap.add_argument('--final-div-factor', type=float, default=1e3, help='OneCycleLR min_lr = initial_lr / final_div_factor')
 
     ap.add_argument('--off-weight', type=float, default=0.75, help='Aux offset loss weight')
     ap.add_argument('--augment', action='store_true', help='Enable phase-jitter augmentation during training.')
