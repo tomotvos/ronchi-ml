@@ -1,34 +1,74 @@
-import cv2
-import argparse
-from pathlib import Path
+#!/usr/bin/env python3
+import argparse, cv2 as cv, numpy as np, json
 
-def preprocess_ronchi(input_path: Path, size: int = 320):
-    """Preprocess a Ronchi image for model inference.
+def _to_gray(img):
+    if img.ndim == 2:
+        if img.dtype != np.uint8:
+            img = cv.normalize(img, None, 0, 255, cv.NORM_MINMAX).astype(np.uint8)
+        return img
+    if img.ndim == 3:
+        if img.shape[2] == 3:
+            return cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+        if img.shape[2] == 4:
+            return cv.cvtColor(img, cv.COLOR_BGRA2GRAY)
+    raise ValueError(f"Unsupported image shape: {img.shape!r}")
 
-    Steps:
-    1. Read as grayscale.
-    2. Apply histogram equalization to normalize contrast.
-    3. Resize to match model training size.
-    """
-    img = cv2.imread(str(input_path), cv2.IMREAD_GRAYSCALE)
-    if img is None:
-        raise FileNotFoundError(f"Could not read image: {input_path}")
+def preprocess_image(src_path, dst_path, resize=320, binarize_mode="auto", force_1bit=False, report_json=False):
+    img_raw = cv.imread(src_path, cv.IMREAD_UNCHANGED)
+    if img_raw is None:
+        raise FileNotFoundError(src_path)
+    gray = _to_gray(img_raw)
 
-    # Equalize brightness and contrast
-    img = cv2.equalizeHist(img)
+    gray = cv.resize(gray, (resize, resize), interpolation=cv.INTER_AREA)
 
-    # Resize to training resolution
-    img = cv2.resize(img, (size, size), interpolation=cv2.INTER_AREA)
+    did_binarize = False
+    if binarize_mode not in ("always","auto","off"):
+        raise ValueError("--binarize must be one of: auto, always, off")
+    if binarize_mode == "always":
+        did_binarize = True
+    elif binarize_mode == "auto":
+        h, w = gray.shape
+        step = max(1, (h*w)//100)
+        sample = gray.reshape(-1)[::step]
+        uniq = np.unique(sample)
+        if len(uniq) > 3:
+            did_binarize = True
 
-    # Save next to original
-    output_path = input_path.with_name(f"{input_path.stem}_preprocessed.png")
-    cv2.imwrite(str(output_path), img)
-    print(f"Saved preprocessed image to: {output_path}")
+    if did_binarize:
+        _, bw = cv.threshold(gray, 0, 255, cv.THRESH_BINARY + cv.THRESH_OTSU)
+        gray = bw
+
+    if force_1bit:
+        gray = (gray > 127).astype(np.uint8) * 255
+
+    ok = cv.imwrite(dst_path, gray)
+    if not ok:
+        raise RuntimeError(f"Failed to write {dst_path}")
+
+    if report_json:
+        stats = {
+            "input": src_path,
+            "output": dst_path,
+            "shape": [int(gray.shape[0]), int(gray.shape[1])],
+            "resize": int(resize),
+            "binarize": binarize_mode,
+            "did_binarize": bool(did_binarize),
+            "force_1bit": bool(force_1bit),
+            "unique_values_count": int(len(np.unique(gray))),
+        }
+        print(json.dumps(stats, indent=2))
+    else:
+        print(f"wrote {dst_path}  (resize={resize}, binarize={binarize_mode}, did_binarize={did_binarize}, 1bit={force_1bit})")
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Preprocess Ronchi image for model inference.")
-    parser.add_argument("image_path", type=str, help="Path to the input image")
-    parser.add_argument("--size", type=int, default=320, help="Resize dimension (default=320)")
-    args = parser.parse_args()
+    ap = argparse.ArgumentParser(description="Preprocess a Ronchi image exactly like inference (grayscale+resize+optional Otsu binarize).")
+    ap.add_argument("--in", dest="src", required=True, help="Source image path")
+    ap.add_argument("--out", dest="dst", required=True, help="Destination PNG path")
+    ap.add_argument("--resize", type=int, default=320, help="Output size (square). Default: 320")
+    ap.add_argument("--binarize", choices=["auto","always","off"], default="auto", help="Binarization mode (Otsu after resize). Default: auto")
+    ap.add_argument("--force-1bit", action="store_true", help="Force strict {0,255} output values after binarization step")
+    ap.add_argument("--report-json", action="store_true", help="Print a JSON report with processing details")
+    args = ap.parse_args()
 
-    preprocess_ronchi(Path(args.image_path), size=args.size)
+    preprocess_image(args.src, args.dst, resize=args.resize, binarize_mode=args.binarize, force_1bit=args.force_1bit, report_json=args.report_json)
